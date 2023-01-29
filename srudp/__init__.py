@@ -234,42 +234,19 @@ class ReliableSocket(socket):
         self.try_connect = True
 
         # bind socket address
-        conn_addr = list(get_formal_address_format(address, self.family))
-        bind_addr = conn_addr.copy()
+        self.address = tuple(get_formal_address_format(address, self.family))
+        self.receiver_socket.bind(("", self.address[1]))
 
-        if conn_addr[0] in ("127.0.0.1", "::1"):
-            # local (for debug)
-            another_port = conn_addr[1]
-            if another_port % 2:
-                another_port -= 1  # use 2n+1 if 2n is used
-            else:
-                another_port += 1  # use 2n if 2n+1 is used
-            # another socket is on the same PC and can bind only one
-            try:
-                self.receiver_socket.bind(tuple(bind_addr))
-                conn_addr[1] = another_port
-            except OSError:
-                # note: this raise OSError if already bind
-                # unexpected: this raise OSError if CLOSE_WAIT state
-                bind_addr[1] = another_port
-                self.receiver_socket.bind(tuple(bind_addr))
-            self.sender_socket_optional = socket(self.family, s.SOCK_DGRAM)
-        else:
-            # global
-            bind_addr[0] = ""
-            self.receiver_socket.bind(tuple(bind_addr))
-
-        self.address = address = tuple(conn_addr)
-        log.debug("try to communicate addr={} bind={}".format(address, bind_addr))
+        log.debug("try to communicate addr={} bind={}".format(self.address, ("", self.address[1])))
 
         # 1. UDP hole punching
-        self.sendto(S_HOLE_PUNCHING, address)
+        self.sendto(S_HOLE_PUNCHING, self.address)
         for _ in range(int(self.timeout / self.span)):
             r, _w, _x = select([self.receiver_socket.fileno()], [], [], self.span)
             if r:
                 data, _addr = self.receiver_socket.recvfrom(1024)
                 if data  == S_HOLE_PUNCHING:
-                    self.sendto(S_ESTABLISHED, address)
+                    self.sendto(S_ESTABLISHED, self.address)
                     log.debug("success UDP hole punching")
                     break
 
