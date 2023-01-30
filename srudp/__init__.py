@@ -2,18 +2,18 @@
 `connection()` establishment process
 ====
 ```uml
-                  ┌─┐                                            ┌─┐
-                  │A│                                            │B│
-                  └┬┘                                            └┬┘
-                   │              udp-hole-punching               │ ╔═══════════════╗
-                   │───────────────────────────────────────────────>║ B established ║
-                   │                                              │ ╚═══════════════╝
-╔════════════════╗ │           udp-hole-punching (fail)           │
-║ A established  ║<───────────────────────────────────────────────│
-╚════════════════╝ │                                              │
-                  ┌┴┐                                            ┌┴┐
-                  │A│                                            │B│
-                  └─┘                                            └─┘
+                  ┌─┐                                      ┌─┐
+                  │A│                                      │B│
+                  └┬┘                                      └┬┘
+                   │           udp-hole-punching            │ ╔═══════════════╗
+                   │─────────────────────────────────────────>║ B established ║
+                   │                                        │ ╚═══════════════╝
+╔════════════════╗ │        udp-hole-punching (fail)        │
+║ A established  ║<─────────────────────────────────────────│
+╚════════════════╝ │                                        │
+                  ┌┴┐                                      ┌┴┐
+                  │A│                                      │B│
+                  └─┘                                      └─┘
 ```
 
 note
@@ -22,12 +22,13 @@ note
 * when both hole-punching is fail, you can't use UDP-hole-punching method in your network
   and you need to open the port in your firewall and router.
 """
-from typing import NamedTuple, Optional, Union, Deque, Tuple, Callable, Any
+from typing import NamedTuple, Optional, Deque, Tuple, Callable, Any
 from select import select
 from time import sleep, time
 from collections import deque
 from struct import Struct
 from socket import socket
+from math import floor
 import socket as s
 import threading
 import logging
@@ -36,28 +37,18 @@ import os
 
 
 log = logging.getLogger(__name__)
+
+# LE, uint8_t, uint16_t, uint8_t, double
 packet_struct = Struct("<BIBd")
 
-CONTROL_ACK = 0b00000001  # Acknowledge
-CONTROL_PSH = 0b00000010  # Push data immediately
-CONTROL_EOF = 0b00000100  # end of file
-CONTROL_BCT = 0b00001000  # broadcast
-CONTROL_RTM = 0b00010000  # ask retransmission
-# CONTROL_MTU = 0b00100000  # fix MTU size
-CONTROL_FIN = 0b01000000  # fin
-FLAG_NAMES = {
-    0b00000000: "---",
-    CONTROL_ACK: "ACK",
-    CONTROL_PSH: "PSH",
-    CONTROL_EOF: "EOF",
-    CONTROL_PSH | CONTROL_EOF: "PSH+EOF",
-    CONTROL_BCT: "BCT",
-    CONTROL_RTM: "RTM",
-    # CONTROL_MTU: "MTU",
-    CONTROL_FIN: "FIN",
-}
-WINDOW_MAX_SIZE = 32768  # 32kb
-SEND_BUFFER_SIZE = WINDOW_MAX_SIZE * 8  # 256kb
+CONTROL_ACK = 0b00000001  # [0x1]  - Acknowledge
+CONTROL_PSH = 0b00000010  # [0x2]  - Push data immediately
+CONTROL_EOF = 0b00000100  # [0x4]  - end of file
+CONTROL_BCT = 0b00001000  # [0x8]  - broadcast
+CONTROL_RTM = 0b00010000  # [0x10] - ask retransmission
+CONTROL_FIN = 0b00100000  # [0x20] - fin
+
+SEND_BUFFER_SIZE = 262144  # 256kb
 MAX_RETRANSMIT_LIMIT = 4
 FULL_SIZE_PACKET_WAIT = 0.001  # sec
 
@@ -73,7 +64,6 @@ S_ESTABLISHED = b'\x02'
 
 # typing
 _Address = Tuple[Any, ...]
-_WildAddress = Union[_Address, str, bytes]
 _BroadcastHook = Callable[['Packet', 'ReliableSocket'], None]
 
 
@@ -126,7 +116,6 @@ class CycInt(int):
 # static cycle int
 CYC_INT0 = CycInt(0)
 
-
 class Packet(NamedTuple):
     """
     static 14b
@@ -138,29 +127,13 @@ class Packet(NamedTuple):
     time: float  # unix time (double)
     data: bytes  # data body
 
-    def __repr__(self) -> str:
-        return "Packet({} seq:{} retry:{} time:{} data:{}b)".format(
-            FLAG_NAMES.get(self.control), self.sequence,
-            self.retry, round(self.time, 2), len(self.data))
-
-
 def bin2packet(b: bytes) -> 'Packet':
     c, seq, r, t = packet_struct.unpack_from(b)
     return Packet(c, CycInt(seq), r, t, b[packet_struct.size:])
 
-
 def packet2bin(p: Packet) -> bytes:
     # log.debug("s>> %s", p)
     return packet_struct.pack(p.control, int(p.sequence), p.retry, p.time) + p.data
-
-
-def get_formal_address_format(address: _WildAddress, family: int = s.AF_INET) -> _Address:
-    """tuple of ipv4/6 correct address format"""
-    assert isinstance(address, tuple), "cannot recognize bytes or str format"
-    for _, _, _, _, addr in s.getaddrinfo(str(address[0]), int(address[1]), family, s.SOCK_STREAM):
-        return addr
-    else:
-        raise ConnectionError("not found correct ip format of {}".format(address))
 
 
 class ReliableSocket(socket):
@@ -170,15 +143,14 @@ class ReliableSocket(socket):
         "receiver_seq", "receiver_unread_size", "receiver_socket",
         "broadcast_hook_fnc", "loss", "try_connect", "established"]
 
-    def __init__(self, family: int = s.AF_INET, timeout: float = 21.0, span: float = 3.0) -> None:
+    def __init__(self, timeout: float = 21.0, span: float = 3.0) -> None:
         """
-        :param family: socket type AF_INET or AF_INET6
         :param timeout: auto socket close by the time passed (sec)
         :param span: check socket status by the span (sec)
         """
         # self bind buffer
-        super().__init__(family, s.SOCK_STREAM)
-        super().bind(("127.0.0.1" if family == s.AF_INET else "::1", 0))
+        super().__init__(s.AF_INET, s.SOCK_STREAM)
+        super().bind(("127.0.0.1", 0))
         self_address = super().getsockname()
         super().connect(self_address)
 
@@ -198,7 +170,7 @@ class ReliableSocket(socket):
         # receiver params
         self.receiver_seq = CycInt(1)  # next receive sequence
         self.receiver_unread_size = 0
-        self.receiver_socket = socket(family, s.SOCK_DGRAM)
+        self.receiver_socket = socket(s.AF_INET, s.SOCK_DGRAM)
 
         # broadcast hook
         # note: don't block this method or backend thread will be broken
@@ -221,10 +193,7 @@ class ReliableSocket(socket):
         return "<ReliableSocket %s %s send=%s recv=%s loss=%s>"\
                % (status, self.address, self.sender_seq, self.receiver_seq, self.loss)
 
-    def bind(self, _address: _WildAddress) -> None:
-        raise NotImplementedError("don't use bind() method")
-
-    def connect(self, address: _WildAddress) -> None:
+    def connect(self, address: tuple) -> None:
         """throw hole-punch msg, listen port and exchange keys"""
         assert not self.established, "already established"
         assert not self.is_closed, "already closed socket"
@@ -234,7 +203,7 @@ class ReliableSocket(socket):
         self.try_connect = True
 
         # bind socket address
-        self.address = tuple(get_formal_address_format(address, self.family))
+        self.address = address
         self.receiver_socket.bind(("", self.address[1]))
 
         log.debug("try to communicate addr={} bind={}".format(self.address, ("", self.address[1])))
@@ -264,20 +233,19 @@ class ReliableSocket(socket):
         # get best MUT size
         # set don't-fragment flag & reset after
         # avoid Path MTU Discovery Blackhole
-        if self.family == s.AF_INET:
-            self.receiver_socket.setsockopt(s.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
+        self.receiver_socket.setsockopt(s.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
         self.mtu_size = self._find_mtu_size()
-        if self.family == s.AF_INET:
-            self.receiver_socket.setsockopt(s.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DONT)
+        self.receiver_socket.setsockopt(s.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DONT)
         log.debug("success get MUT size %db", self.mtu_size)
 
         # success establish connection
-        threading.Thread(target=self._backend, name="SRUDP", daemon=True).start()
+        threading.Thread(target=self._backend, name="RUDP", daemon=True).start()
         self.established = True
 
         # auto exit when program closed
         atexit.register(self.close)
 
+    # TODO: Replace _find_mtu_size() with https://stackoverflow.com/questions/25841/maximum-buffer-length-for-sendto
     def _find_mtu_size(self) -> int:
         """confirm by submit real packet"""
         wait = 0.05
@@ -342,13 +310,13 @@ class ReliableSocket(socket):
 
             # send ack as ping (stream may be free)
             if self.span < time() - last_ack_time:
-                p = Packet(CONTROL_ACK, self.receiver_seq - 1, 0, time(), b'as ping')
+                p = Packet(CONTROL_ACK, self.receiver_seq - 1, 0, time(), b'')
                 self.sendto(packet2bin(p), self.address)
                 last_ack_time = time()
 
             # connection may be broken
             if self.timeout < time() - last_receive_time:
-                p = Packet(CONTROL_FIN, CYC_INT0, 0, time(), b'stream may be broken')
+                p = Packet(CONTROL_FIN, CYC_INT0, 0, time(), b'')
                 self.sendto(packet2bin(p), self.address)
                 break
 
@@ -389,7 +357,7 @@ class ReliableSocket(socket):
 
             # receive reset
             if packet.control & CONTROL_FIN:
-                p = Packet(CONTROL_FIN, CYC_INT0, 0, time(), b'be notified fin or reset')
+                p = Packet(CONTROL_FIN, CYC_INT0, 0, time(), b'')
                 self.sendto(packet2bin(p), self.address)
                 break
 
@@ -481,7 +449,7 @@ class ReliableSocket(socket):
             # push buffer immediately
             if packet.control & CONTROL_PSH:
                 # send ack
-                p = Packet(CONTROL_ACK, self.receiver_seq - 1, 0, time(), b'put buffer')
+                p = Packet(CONTROL_ACK, self.receiver_seq - 1, 0, time(), b'')
                 self.sendto(packet2bin(p), self.address)
                 last_ack_time = time()
                 # log.debug("pushed! buffer %d %s", len(retransmit_packets), retransmit_packets)
@@ -508,24 +476,14 @@ class ReliableSocket(socket):
     def _send_buffer_is_full(self) -> bool:
         return SEND_BUFFER_SIZE < sum(len(p.data) for p in self.sender_buffer)
 
-    def get_window_size(self) -> int:
-        """maximum size of data you can send at once"""
-        # Packet = [nonce 16b][tag 16b][static 14b][data xb]
-        return self.mtu_size - 32 - packet_struct.size
-
-    def send(self, data: bytes, flags: int = 0) -> int:
-        """over write low-level method for compatibility"""
-        assert flags == 0, "unrecognized flags"
-        self.sendall(data)
-        return len(data)
-
     def _send(self, data: memoryview) -> int:
         """warning: row-level method"""
         if not self.established:
             raise ConnectionAbortedError('disconnected')
 
-        window_size = self.get_window_size()
-        length = len(data) // window_size
+        # Packet = [nonce 16b][tag 16b][static 14b][data xb]
+        window_size = self.mtu_size - 46
+        length = floor(len(data) / window_size)
         send_size = 0
         for i in range(length + 1):
             # control flag
@@ -565,9 +523,8 @@ class ReliableSocket(socket):
         else:
             return self.sender_socket_optional.sendto(data, address)
 
-    def sendall(self, data: bytes, flags: int = 0) -> None:
+    def sendall(self, data: bytes) -> None:
         """high-level method, use this instead of send()"""
-        assert flags == 0, "unrecognized flags"
         send_size = 0
         data = memoryview(data)
         while send_size < len(data):
@@ -583,24 +540,18 @@ class ReliableSocket(socket):
         """broadcast data (do not check reach)"""
         if not self.established:
             raise ConnectionAbortedError('disconnected')
-        # do not check size
-        # window_size = self.get_window_size()
-        # if window_size < len(data):
-        #    raise ValueError("data is too big {}<{}".format(window_size, len(data)))
         packet = Packet(CONTROL_BCT, CYC_INT0, 0, time(), data)
         with self.sender_buffer_lock:
             self.sendto(packet2bin(packet), self.address)
 
-    def recv(self, buflen: int = 1024, flags: int = 0) -> bytes:
-        assert flags == 0, "unrecognized flags"
-
+    def recv(self, buflen: int = 1024) -> bytes:
         if self.is_closed:
             return b""
         elif not self.established:
             return b""
         else:
             try:
-                data = super().recv(buflen, flags)
+                data = super().recv(buflen, 0)
                 self.receiver_unread_size -= len(data)
                 return data
             except ConnectionError:
@@ -634,7 +585,7 @@ class ReliableSocket(socket):
     def close(self) -> None:
         if self.established:
             self.established = False
-            p = Packet(CONTROL_FIN, CYC_INT0, 0, time(), b'closed')
+            p = Packet(CONTROL_FIN, CYC_INT0, 0, time(), b'')
             self.sendto(packet2bin(p), self.address)
             self.receiver_socket.close()
             super().close()
@@ -642,13 +593,12 @@ class ReliableSocket(socket):
                 self.sender_socket_optional.close()
             atexit.unregister(self.close)
 
-def get_mtu_linux(family: int, host: str) -> int:
+def get_mtu_linux(host: str = "8.8.8.8") -> int:
     """MTU on Linux"""
-    with socket(family, s.SOCK_DGRAM) as sock:
+    with socket(s.AF_INET, s.SOCK_DGRAM) as sock:
         sock.connect((host, 0))
-        if family == s.AF_INET:
-            # set option DF (only for ipv4)
-            sock.setsockopt(s.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
+        sock.setsockopt(s.IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DO)
+
         return sock.getsockopt(s.IPPROTO_IP, IP_MTU)
 
 
@@ -714,7 +664,6 @@ __all__ = [
     "Packet",
     "bin2packet",
     "packet2bin",
-    "get_formal_address_format",
     "ReliableSocket",
     "get_mtu_linux",
 ]
