@@ -171,7 +171,7 @@ def get_formal_address_format(address: '_WildAddress', family: int = s.AF_INET) 
 
 class ReliableSocket(socket):
     __slots__ = [
-        "_timeout", "span", "address", "mtu_size",
+        "_timeout", "span", "address", "source_address", "mtu_size",
         "sender_seq", "sender_buffer", "sender_signal", "sender_buffer_lock", "sender_socket_optional", "sender_time",
         "receiver_seq", "receiver_unread_size", "receiver_socket",
         "broadcast_hook_fnc", "loss", "try_connect", "established"]
@@ -185,14 +185,13 @@ class ReliableSocket(socket):
         # self bind buffer
         super().__init__(family, s.SOCK_STREAM)
         super().bind(("127.0.0.1" if family == s.AF_INET else "::1", 0))
-        self_address = super().getsockname()
-        super().connect(self_address)
+        self.source_address = super().getsockname()
+        super().connect(self.source_address)
 
         # inner params
         self._timeout = timeout
         self.span = span
         self.address: '_Address' = None
-        self.shared_key: bytes = None
         self.mtu_size = 0  # 1472b
         self.sender_time = 0.0
 
