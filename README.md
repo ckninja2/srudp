@@ -1,6 +1,6 @@
 Secure Reliable UDP
 ====
-This repository provides **Secure Reliable Data Stream** that works like TCP.  
+This repository provides **Reliable Data Stream** that works like TCP.  
 My purpose is enable users create P2P connection between clients in closed NAT.
 
 [![Build Status](https://travis-ci.org/namuyan/srudp.svg?branch=master)](https://travis-ci.org/namuyan/srudp)
@@ -19,21 +19,19 @@ Features
 Requirement
 ----
 * Python**3.6+**
-* [requirements.txt](requirements.txt)
 
 Installation
 ----
 [tutorial for users "cannot work on my condition"](TUTORIAL.md)
 ```bash
-pip3 install --user srudp
+pip3 install git+https://github.com/ckninja2/srudp.git
 ```
 
 Tests
 ----
 ```commandline
-git clone https://github.com/namuyan/srudp
+git clone https://github.com/ckninja2/srudp
 cd srudp
-pip3 install --user -r requirements.txt
 python3 -m mypy --config-file=mypy.ini srudp
 python3 -m unittest discover
 ```
@@ -42,10 +40,10 @@ Demo
 ----
 Prepare two independent PCs.
 ```python
-from srudp import SecureReliableSocket
+from srudp import ReliableSocket
 from time import sleep, time
  
-sock = SecureReliableSocket()
+sock = ReliableSocket()
 sock.connect(("<remote host 1>", 12345))
  
 while not sock.is_closed:
@@ -56,10 +54,10 @@ print("closed", sock)
 A side, send message hello once in a 3 sec.
 
 ```python
-from srudp import SecureReliableSocket
+from srudp import ReliableSocket
 from time import time
  
-sock = SecureReliableSocket()
+sock = ReliableSocket()
 sock.connect(("<remote host 2>", 12345))
  
 while not sock.is_closed:
@@ -74,14 +72,14 @@ Another side, receive the message and show immediately.
 asyncio usage
 ----
 ```python
-from srudp import SecureReliableSocket
+from srudp import ReliableSocket
 import asyncio
 
 # Get a reference to the current event loop
 loop = asyncio.get_event_loop()
 
 # create a socket
-sock = SecureReliableSocket()
+sock = ReliableSocket()
 
 # connect() on another thread because block event loop
 address = ("example.com", 3000)
